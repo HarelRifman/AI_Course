@@ -42,10 +42,9 @@ class WateringProblem(search.Problem):
         search.Problem.__init__(self, initial_state)
 
         # 2. Pre-compute All-Pairs Shortest Paths (APSP)
-        # We store this in a flat 2D array: dist_matrix[idx1][idx2]
         self.dist_matrix = self._compute_apsp()
         
-        # Pre-cache tap indices for heuristic (corresponds to sorted_taps order)
+        # Pre-cache tap indices for heuristic
         self.tap_indices = [self._to_idx(t[0], t[1]) for t in sorted_taps]
 
     def _compute_apsp(self):
@@ -92,7 +91,6 @@ class WateringProblem(search.Problem):
         """
         robots, plants, taps = state
         
-        # Quick lookup sets
         occupied = {(r[1], r[2]) for r in robots}
         plant_map = {(p[0], p[1]): i for i, p in enumerate(plants)}
         tap_map = {(t[0], t[1]): i for i, t in enumerate(taps)}
@@ -102,16 +100,10 @@ class WateringProblem(search.Problem):
         for i, r in enumerate(robots):
             r_id, r_r, r_c, r_load = r
             
-            # --- Conditional Pruning Logic ---
-            # Check if this robot is "crowded" (any other robot is adjacent).
-            # If NOT crowded, and we can perform a useful action (Pour/Load),
-            # we do ONLY that action (prune moves).
-            # If crowded, we allow moves to let the robot step aside.
-            
+            # Crowding check
             is_crowded = False
             for j, other in enumerate(robots):
                 if i != j:
-                    # Manhattan distance <= 1 means adjacent or same cell (impossible)
                     dist = abs(r_r - other[1]) + abs(r_c - other[2])
                     if dist <= 1:
                         is_crowded = True
@@ -139,7 +131,7 @@ class WateringProblem(search.Problem):
                     )
             
             # 2. Try LOAD
-            elif (r_r, r_c) in tap_map: # Else-if: usually can't be on plant AND tap
+            elif (r_r, r_c) in tap_map:
                 t_idx = tap_map[(r_r, r_c)]
                 t_r, t_c, t_amt = taps[t_idx]
                 r_cap = self.capacities[r_id]
@@ -160,8 +152,6 @@ class WateringProblem(search.Problem):
                     )
 
             # 3. Move Actions
-            # If we acted and are NOT crowded, we skip moving (Pruning).
-            # If we didn't act, OR we are crowded, we generate moves.
             if not (action_performed and not is_crowded):
                 for name, dr, dc in [("UP", -1, 0), ("DOWN", 1, 0), ("LEFT", 0, -1), ("RIGHT", 0, 1)]:
                     nr, nc = r_r + dr, r_c + dc
@@ -182,7 +172,7 @@ class WateringProblem(search.Problem):
 
     def h_astar(self, node):
         """
-        Admissible Heuristic: Resource Cost + MST Travel Cost + Tap Penalty
+        Admissible Heuristic: Actions + MST(Plants) + Minimum Entry Cost
         """
         state = node.state
         robots, plants, taps = state
@@ -190,7 +180,7 @@ class WateringProblem(search.Problem):
         if not plants:
             return 0
         
-        # 1. Resource Costs
+        # --- 1. Resource Action Costs (Load/Pour) ---
         total_need = 0
         for p in plants:
             total_need += p[2]
@@ -199,82 +189,107 @@ class WateringProblem(search.Problem):
         for r in robots:
             total_carried += r[3]
             
+        # Cost to POUR
         h_pour = total_need
+        # Cost to LOAD (Deficit)
         deficit = max(0, total_need - total_carried)
         h_load = deficit
         
-        # 2. MST (Travel Cost)
-        # Nodes: 0 (Fleet), 1..N (Plants)
-        
+        # --- 2. Plant Traversal Cost (MST) ---
+        # This calculates the minimum wire to connect all plants together.
         plant_indices = [self._to_idx(p[0], p[1]) for p in plants]
         num_plants = len(plants)
-        num_nodes = num_plants + 1
-        
-        min_dists = [float('inf')] * num_nodes
-        visited = [False] * num_nodes
-        
-        # Init Fleet -> Plants distances
-        # dist(Fleet, P) = min(dist(r, P) for r in robots)
-        min_dists[0] = 0
-        
-        robot_indices = [self._to_idx(r[1], r[2]) for r in robots]
-        
-        for i in range(num_plants):
-            p_idx = plant_indices[i]
-            best_r_dist = float('inf')
-            for r_idx in robot_indices:
-                d = self.dist_matrix[r_idx][p_idx]
-                if d < best_r_dist:
-                    best_r_dist = d
-            min_dists[i+1] = best_r_dist
-
         mst_weight = 0
         
-        # Prim's Algorithm
-        for _ in range(num_nodes):
-            u = -1
-            min_val = float('inf')
+        # Prim's Algorithm for MST of Plants only
+        if num_plants > 1:
+            # Distance from tree to remaining nodes
+            # Start with first plant as the tree
+            min_dists = [self.dist_matrix[plant_indices[0]][plant_indices[i]] 
+                         for i in range(num_plants)]
+            visited = [False] * num_plants
+            visited[0] = True
             
-            # Simple linear scan is fast enough for small N
-            for n in range(num_nodes):
-                if not visited[n] and min_dists[n] < min_val:
-                    min_val = min_dists[n]
-                    u = n
-            
-            if u == -1: 
-                break
+            # We need to add N-1 edges
+            for _ in range(num_plants - 1):
+                # Find closest unvisited node to the current tree
+                u = -1
+                min_val = float('inf')
+                for i in range(num_plants):
+                    if not visited[i] and min_dists[i] < min_val:
+                        min_val = min_dists[i]
+                        u = i
                 
-            visited[u] = True
-            mst_weight += min_val
-            
-            # Update neighbors (Only Plant->Plant)
-            if u > 0:
-                u_p_idx = plant_indices[u-1]
-                for v in range(1, num_nodes):
+                if u == -1: break # Should not happen in connected component
+                
+                visited[u] = True
+                mst_weight += min_val
+                
+                # Update distances from the new node u
+                u_idx = plant_indices[u]
+                for v in range(num_plants):
                     if not visited[v]:
-                        v_p_idx = plant_indices[v-1]
-                        d = self.dist_matrix[u_p_idx][v_p_idx]
+                        v_idx = plant_indices[v]
+                        d = self.dist_matrix[u_idx][v_idx]
                         if d < min_dists[v]:
                             min_dists[v] = d
 
-        # 3. Tap Travel Penalty
-        h_tap = 0
-        if deficit > 0:
-            min_p_t = float('inf')
-            # Check only active taps
-            # Using pre-computed tap_indices + dynamic check
-            for i, t in enumerate(taps):
-                if t[2] > 0: # Tap has water
-                    t_idx = self.tap_indices[i]
-                    for p_idx in plant_indices:
-                        d = self.dist_matrix[p_idx][t_idx]
-                        if d < min_p_t:
-                            min_p_t = d
+        # --- 3. Entry Cost ---
+        # We have a network of plants (MST). We need to enter it.
+        # We can enter from a Robot -> Plant (if robot has water)
+        # Or Robot -> Tap -> Plant (if robot is empty)
+        # We take the global minimum cost to start watering.
+        
+        # Pre-calculate closest plant distance for every tap (needed for empty robots)
+        # tap_to_closest_plant[t_idx] = distance
+        tap_to_any_plant = []
+        
+        # Only check active taps (amt > 0)
+        active_taps = [t for t in taps if t[2] > 0]
+        if not active_taps and deficit > 0:
+             return float('inf') # Dead end
+
+        # If we have a deficit, we might need the taps.
+        if deficit > 0 or not active_taps:
+             # Optimization: If deficit > 0, we perform this check.
+             # If deficit == 0, we can theoretically ignore empty robots, 
+             # but to be safe/simple we calculate tap distances if taps exist.
+             if active_taps:
+                 for t in active_taps:
+                     t_idx = self._to_idx(t[0], t[1])
+                     min_d = float('inf')
+                     for p_idx in plant_indices:
+                         d = self.dist_matrix[t_idx][p_idx]
+                         if d < min_d:
+                             min_d = d
+                     tap_to_any_plant.append((t_idx, min_d))
+
+        min_entry_cost = float('inf')
+
+        for r in robots:
+            r_idx = self._to_idx(r[1], r[2])
             
-            if min_p_t != float('inf'):
-                h_tap = min_p_t
-                    
-        return h_pour + h_load + mst_weight + h_tap
+            # Option A: Robot goes directly to a plant (valid if load > 0)
+            if r[3] > 0:
+                for p_idx in plant_indices:
+                    d = self.dist_matrix[r_idx][p_idx]
+                    if d < min_entry_cost:
+                        min_entry_cost = d
+            
+            # Option B: Robot goes to Tap then Plant (valid always, necessary if empty)
+            # Cost = Dist(R, Tap) + Dist(Tap, Closest_Plant_To_That_Tap)
+            if active_taps:
+                for t_idx, t_p_dist in tap_to_any_plant:
+                    r_t_dist = self.dist_matrix[r_idx][t_idx]
+                    total = r_t_dist + t_p_dist
+                    if total < min_entry_cost:
+                        min_entry_cost = total
+
+        # If no path found (unreachable), min_entry_cost remains inf
+        if min_entry_cost == float('inf'):
+            return float('inf')
+
+        return h_pour + h_load + mst_weight + min_entry_cost
 
     def h_gbfs(self, node):
         return self.h_astar(node)
