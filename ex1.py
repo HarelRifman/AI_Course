@@ -1,9 +1,6 @@
 import search
-import random
-import math
-import itertools
 
-ids = ["111111111", "222222222"]
+ids = ["217398338"]
 
 class WateringProblem(search.Problem):
     """
